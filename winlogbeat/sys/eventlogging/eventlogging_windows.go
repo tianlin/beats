@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -150,9 +152,42 @@ func RenderEvents(
 			event.EventData.Pairs = append(event.EventData.Pairs, sys.KeyValue{Value: s})
 		}
 
-		// Format the parametrized message using the insert strings.
-		event.Message, err = formatMessage(record.sourceName,
+		//fmt.Printf("Begin to format message %d %s %d %v\n",
+		//	record.recordNumber, record.sourceName, record.eventID, stringInserts)
+
+		event.Message, err = formatMessage(
+			windows.FORMAT_MESSAGE_FROM_HMODULE|
+				windows.FORMAT_MESSAGE_FROM_SYSTEM|
+				windows.FORMAT_MESSAGE_IGNORE_INSERTS,
+			record.sourceName,
 			record.eventID, lang, stringInsertPtrs, buffer, pubHandleProvider)
+
+		if err == nil && len(stringInserts) > 0 {
+			// Verify message is valid first
+			re := regexp.MustCompile("%\\d")
+			matches := re.FindAllString(event.Message, -1)
+			isValid := true
+			for _, match := range matches {
+				num, _ := strconv.Atoi(strings.TrimPrefix(match, "%"))
+				if num > len(stringInserts) {
+					isValid = false
+					err = fmt.Errorf("raw message[%s] is invalid:args len is %d",
+						event.Message, len(stringInserts))
+					break
+				}
+			}
+
+			if isValid {
+				// Format the parametrized message using the insert strings.
+				event.Message, err = formatMessage(
+					windows.FORMAT_MESSAGE_FROM_HMODULE|
+						windows.FORMAT_MESSAGE_FROM_SYSTEM|
+						windows.FORMAT_MESSAGE_ARGUMENT_ARRAY,
+					record.sourceName,
+					record.eventID, lang, stringInsertPtrs, buffer, pubHandleProvider)
+			}
+		}
+
 		if err != nil {
 			event.RenderErr = err.Error()
 			if errno, ok := err.(syscall.Errno); ok {
@@ -176,6 +211,7 @@ func unixTime(sec uint32) time.Time {
 // formatMessage takes event data and formats the event message into a
 // normalized format.
 func formatMessage(
+	flags uint32,
 	sourceName string,
 	eventID uint32,
 	lang uint32,
@@ -200,8 +236,7 @@ func formatMessage(
 		}
 
 		numChars, err := _FormatMessage(
-			windows.FORMAT_MESSAGE_FROM_HMODULE|
-				windows.FORMAT_MESSAGE_ARGUMENT_ARRAY,
+			flags,
 			Handle(fh.Handle),
 			eventID,
 			lang,
